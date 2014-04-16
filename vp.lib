@@ -1,0 +1,377 @@
+#ifndef _VANTAGEPRO_LIB_
+#define _VANTAGEPRO_LIB_
+
+
+typedef struct _loopRecord
+{
+		char id[3];
+		char packetType;
+		unsigned short nextRecord;
+		unsigned short barometer;
+		short insideTemperature;
+		unsigned char insideHumidity;
+		short outsideTemperature;
+		unsigned char windSpeed;
+		unsigned char averageWindSpeed;
+		unsigned short windDirection;
+		char extraTemperature[7];
+		char soil[4];
+		char leaf[4];
+		char outsideHumidity;
+		char extraHumidity[7];
+		short rainRate;
+		unsigned char uv;
+		short solarRadiation;
+		short stormRain;
+		short stormStartDate;
+		short dayRain;
+		short monthRain;
+		short yearRain;
+		short dayET;
+		short monthET;
+		short yearET;
+		char soilMoisture[4];
+		char leafWetness[4];
+		char insideAlarms;
+		char rainAlarms;
+		short outsideAlarms;
+		char extraAlarms[8];
+		char soilLeafAlarms[4];
+		char batteryStatus;
+		short consoleBattery;
+		char forecastIcons;
+		char forecastRule;
+		short sunrise;
+		short sunset;
+		char lf;
+		char cr;
+//		short crc;
+} loopRecord;
+
+typedef struct _loopPacket
+{
+    unsigned char ack;
+    loopRecord lr;
+    unsigned short crc;
+} loopPacket;
+
+typedef struct _archiveRecord
+{
+	unsigned short dateStamp;
+	unsigned short timeStamp;
+	short outsideTemperature;
+	short highOutsideTemperature;
+	short lowOutsideTemperature;
+	unsigned short rainfall;
+	unsigned short highRainRate;
+	unsigned short barometer;
+	unsigned short solarRadiation;
+	unsigned short windSamples;
+	short insideTemperature;
+	unsigned char insideHumidity;
+	unsigned char outsideHumidity;
+	unsigned char windSpeed;
+	unsigned char highWindSpeed;
+	unsigned char highWindDirection;
+	unsigned char windDirection;
+	unsigned char averageUV;
+	unsigned char ET;
+	char invalidData;
+	unsigned char soilMoisture[4];
+	char soilTemperature[4];
+	unsigned char leafWetness[4];
+	char extraTemperature[2];
+	unsigned char extraHumidity[2];
+	unsigned short reedClosed;
+	unsigned short reedOpened;
+	char unused;
+} archiveRecord;
+
+typedef struct _archivePacket
+{
+    unsigned char ack;
+    archiveRecord ar;
+    unsigned short crc;
+} archivePacket;
+
+// Dynamic C doesn't support bit fields
+
+// dateStamp: year:7 bits
+//              month: 4 bits
+//              day: 5 bits
+// day + month*32 + (year-2000)*512
+
+// timeStamp: (hour * 100) + minute
+
+typedef struct _VPDateTime
+{
+    unsigned short dateStamp;
+    unsigned short timeStamp;
+} VPDateTime;
+
+typedef struct _VPDateTimePacket
+{
+    unsigned char ack;
+    VPDateTime dt;
+    unsigned short crc;
+} VPDateTimePacket;
+
+typedef struct _archiveHeader
+{
+    unsigned short pages;
+    unsigned short startRecord;
+} archiveHeader;
+
+typedef struct _archiveHeaderPacket
+{
+    unsigned char ack;
+    archiveHeader ah;
+    unsigned short crc;
+} archiveHeaderPacket;
+
+typedef struct _archivePage
+{
+    unsigned char sequence;
+    archiveRecord ar[5];
+    unsigned char unused[4];
+} archivePage;
+
+typedef struct _archivePagePacket
+{
+    unsigned char ack;
+    archivePage ap;
+    unsigned short crc;
+} archivePagePacket;
+
+int serialPortInUse;
+
+#define PACKETTIMEOUT 3000UL
+
+unsigned short calculateCRC(unsigned char *start, int bufferSize)
+{
+
+static const unsigned short crctable[8] =
+{
+ 0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50A5, 0x60C6, 0x70E7
+};
+
+    unsigned short crc;
+    int i;
+
+    crc = 0;
+
+    for(i = 0; i < bufferSize; i++)
+    {
+        crc = crctable[(crc >> 8) ^ start[i]] ^ (crc << 8);
+
+    }
+
+}
+
+
+scofunc void serialReceive(char *buffer, int bufferSize, long timeout)
+{
+    int c, x;
+    long cTimeout;
+
+    cTimeout = MS_TIMER + timeout;
+
+    x = 0;
+    do
+    {
+        c = serEgetc();
+        if(c != 0xffff)
+            ((char *)buffer)[x++] = c;
+        yield;
+    }  while (cTimeout > MS_TIMER && x < bufferSize);
+
+}
+
+scofunc int wakeUp()
+{
+    unsigned char buffer[2];
+    int chars, i;
+    unsigned long timeout;
+
+    if(serialPortInUse != 0)
+        return 0;
+    else
+        serialPortInUse = 1;
+
+    // The VP documentation says to try this twice before failing.
+    // VP returns \x0a \x0d when you send \r, \n, or \r\n
+    for(i = 0; i < 2; i++)
+    {
+        timeout = MS_TIMER + PACKETTIMEOUT;
+
+        serEputc(0x000a);
+
+        while(MS_TIMER < timeout)
+        {
+            if(serErdUsed() == 2)
+            {
+                serErdFlush();
+                serialPortInUse = 0;
+                return 1;
+            }
+            yield;
+        }
+        // Flush again just to make sure we didn't get a partial
+        // wakeup reply.
+        serErdFlush();
+
+    }
+    serialPortInUse = 0;
+    return 0;
+}
+
+scofunc int loop(loopPacket *lp)
+{
+    long timeout;
+    int c;
+    int crc;
+
+    if(serialPortInUse != 0)
+        return 0;
+    else
+        serialPortInUse = 1;
+
+    serErdFlush();
+    wfd cof_serEputs("LOOP 1\n");
+
+    timeout = MS_TIMER + PACKETTIMEOUT;
+
+    wfd serialReceive((char *)lp, sizeof(*lp), timeout);
+    if(lp->crc != calculateCRC((char *)&(lp->lr), sizeof(*lp)))
+    {
+        serialPortInUse = 0;
+        return 0;
+    }
+
+    serialPortInUse = 0;
+    return 1;
+}
+
+
+//void dumpArchiveRecords(unsigned int dateTime, void (*callback)(archiveRecord *ar))
+scofunc int dumpArchiveRecords(unsigned long dateTime, void (*callback)())
+{
+    char ack;
+    struct tm archiveTime;
+    unsigned short timeStamp, dateStamp;
+    VPDateTimePacket VPDTPacket;
+    unsigned short crc;
+    archiveHeaderPacket ahp;
+    archivePagePacket app;
+    int i, j;
+    unsigned long timeout;
+
+    if(serialPortInUse != 0)
+        return 0;
+    else
+        serialPortInUse = 1;
+
+    // Use zero for both of the time date values and CRC to force a full download.
+
+    // send DMPAFT
+
+    serErdFlush();
+    wfd cof_serEputs("DMPAFT\n");
+
+    timeout = MS_TIMER + PACKETTIMEOUT;
+    wfd serialReceive(&ack, sizeof(ack), timeout);
+
+    // read ack
+
+    if(ack != 0x06)
+    {
+        serialPortInUse = 0;
+        return 0;
+    }
+
+
+    // convert date/time
+
+    // seconds to tm
+
+    if(dateTime == 0L)
+    {
+        VPDTPacket.ack = 0x06;
+        VPDTPacket.dt.dateStamp = 0L;
+        VPDTPacket.dt.timeStamp = 0L;
+        VPDTPacket.crc = 0;
+    }
+    else
+    {
+        mktm(&archiveTime, dateTime);
+
+        // create ints from tm
+
+        VPDTPacket.ack = 0x06;
+
+        VPDTPacket.dt.dateStamp = (2000 - (archiveTime.tm_year + 1900)) * 512 +
+            archiveTime.tm_mon * 32 + archiveTime.tm_mday;
+
+        VPDTPacket.dt.timeStamp = archiveTime.tm_hour * 100 + archiveTime.tm_min;
+
+        // create checksum
+
+        VPDTPacket.crc = calculateCRC((char *)&(VPDTPacket.dt), sizeof(VPDTPacket.dt));
+
+        // send date/time + checksum
+    }
+
+    wfd cof_serEwrite(&VPDTPacket, sizeof(&VPDTPacket));
+
+    // receive ack, pages, start record and checksum
+
+    wfd serialReceive((char *)&ahp, sizeof(ahp), PACKETTIMEOUT);
+
+    // checksum check
+
+    if(ahp.crc == calculateCRC((char *)&(ahp.ah), sizeof(ahp.ah)))
+    {
+        serialPortInUse = 0;
+        return 0;
+    }
+
+
+    // loop at starting record through given number of pages
+
+    for(i = 0; i < ahp.ah.pages; i++)
+    {
+        wfd cof_serEputc(0x06);
+
+        wfd serialReceive((char *)&app, sizeof(app), PACKETTIMEOUT);
+
+        if(app.crc != calculateCRC((char *)&(app.ap), sizeof(app.ap)))
+        {
+            serErdFlush();
+            serialPortInUse = 0;
+            return 0;
+        }
+
+        for(j = (i == 0 ? ahp.ah.startRecord : 0); j < 5; j++)
+        {
+            (callback)(&(app.ap.ar[j]));
+            yield;
+        }
+    }
+    // if a new record has an earlier time/date then skip
+
+    // call callback with each record.
+    serialPortInUse = 0;
+    return 1;
+}
+
+int convertToVPTime()
+{
+
+}
+
+void convertFromVPTime()
+{
+
+}
+
+#endif
